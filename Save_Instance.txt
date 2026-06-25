@@ -1,0 +1,472 @@
+--!native
+--!optimize 2
+
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function sendNotify(title, text)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 3 })
+    end)
+end
+
+local TPHAT_UI_StatusLabel = nil
+local TPHAT_UI_ProgressBar = nil
+local TPHAT_FileScrollingFrame = nil
+local selectedFileName = ""
+
+local currentPreviewPart = nil
+local currentSelectionBox = nil
+local previewCFrame = CFrame.new()
+local currentPackageData = nil 
+local moveStep = 5 
+
+local forceAnchoredState = "Original" 
+local forceCollideState = "Original"  
+
+local function cleanCFrameMatrix(rawCf)
+    local pos = rawCf.Position
+    local xVec = rawCf.XVector
+    local yVec = rawCf.YVector
+    local zVec = rawCf.ZVector
+    
+    local xUnit = xVec.Magnitude > 0 and xVec.Unit or Vector3.new(1,0,0)
+    local yUnit = yVec.Magnitude > 0 and yVec.Unit or Vector3.new(0,1,0)
+    local zUnit = zVec.Magnitude > 0 and zVec.Unit or Vector3.new(0,0,1)
+    
+    return CFrame.fromMatrix(pos, xUnit, yUnit, zUnit)
+end
+
+local function safeResolvePath(pathStr)
+    if not pathStr or pathStr == "" then return workspace, "OK" end
+    pathStr = string.gsub(pathStr, "^%s*(.-)%s*$", "%1")
+    local segments = {}
+    for segment in string.gmatch(pathStr, "[^.]+") do table.insert(segments, segment) end
+    if #segments == 0 then return workspace, "OK" end
+    
+    local current = game
+    local startIndex = 1
+    if segments[1] == "workspace" or segments[1] == "Workspace" then
+        current = workspace startIndex = 2
+    elseif segments[1] == "game" then
+        if segments[2] == "workspace" or segments[2] == "Workspace" then current = workspace startIndex = 3 else current = game startIndex = 2 end
+    end
+    
+    for i = startIndex, #segments do
+        local name = segments[i]
+        local success, nextObj = pcall(function() return current:FindFirstChild(name) end)
+        if success and nextObj then current = nextObj else return nil, "❌ Không tìm thấy '" .. name .. "'" end
+    end
+    return current, "OK"
+end
+
+local function clearPreview()
+    if currentSelectionBox then pcall(function() currentSelectionBox:Destroy() end) currentSelectionBox = nil end
+    if currentPreviewPart then pcall(function() currentPreviewPart:Destroy() end) currentPreviewPart = nil end
+end
+
+local function serializeInstanceV7(pathString)
+    local targetModel, errMsg = safeResolvePath(pathString)
+    if not targetModel then 
+        if TPHAT_UI_StatusLabel then TPHAT_UI_StatusLabel.Text = errMsg TPHAT_UI_StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100) end
+        return 
+    end
+    
+    if TPHAT_UI_StatusLabel then TPHAT_UI_StatusLabel.Text = "⏳ Đang quét cấu trúc: " .. targetModel.Name end
+    task.wait(0.02)
+    
+    local descendants = {}
+    pcall(function() descendants = targetModel:GetDescendants() end)
+    table.insert(descendants, 1, targetModel)
+    local totalObjects = #descendants
+    
+    local objectToId = {}
+    local stringDict = {}
+    local stringCounter = 0
+    
+    local function getStringId(str)
+        if not str or str == "" then return nil end
+        if stringDict[str] then return stringDict[str] end
+        stringCounter += 1 stringDict[str] = stringCounter
+        return stringCounter
+    end
+    
+    for id, obj in ipairs(descendants) do objectToId[obj] = id end
+    local mainDataBuffer = table.create(totalObjects)
+    local validCount = 0
+    
+    for i, object in ipairs(descendants) do
+        local successProcess, partInfo = pcall(function()
+            local className = object.ClassName
+            local isBasePart = object:IsA("BasePart")
+            
+            if isBasePart or object:IsA("Attachment") or object:IsA("JointInstance") or 
+               object:IsA("Decal") or object:IsA("Texture") or object:IsA("Light") or 
+               object:IsA("SpecialMesh") or object:IsA("Model") or object:IsA("Folder") then
+                
+                local parentObj = object.Parent
+                local parentId = (object ~= targetModel and parentObj) and (objectToId[parentObj] or 0) or 0
+                local info = { I = i, P = parentId, C = getStringId(className), N = getStringId(object.Name) }
+                
+                if isBasePart then
+                    info.S = {object.Size.X, object.Size.Y, object.Size.Z}
+                    info.M = getStringId(object.Material.Name)
+                    info.Col = {math.floor(object.Color.R * 255), math.floor(object.Color.G * 255), math.floor(object.Color.B * 255)}
+                    info.A = object.Anchored and 1 or 0
+                    info.Cc = object.CanCollide and 1 or 0
+                    info.Cf = {object.CFrame:GetComponents()}
+                    
+                    if object:IsA("MeshPart") then
+                        info.Mid = getStringId(object.MeshId)
+                        info.Tid = getStringId(object.TextureId)
+                    elseif object:IsA("UnionOperation") then
+                        info.Aid = getStringId(object.AssetId or object.MeshId or "")
+                    end
+                elseif object:IsA("Attachment") then
+                    info.Cf = {object.CFrame:GetComponents()}
+                elseif object:IsA("JointInstance") then
+                    info.P0 = objectToId[object.Part0] or 0
+                    info.P1 = objectToId[object.Part1] or 0
+                    info.C0 = {object.C0:GetComponents()}
+                    info.C1 = {object.C1:GetComponents()}
+                elseif object:IsA("Decal") or object:IsA("Texture") then
+                    info.Tex = getStringId(object.Texture)
+                    info.Face = getStringId(object.Face.Name)
+                elseif object:IsA("Light") then
+                    info.Col = {math.floor(object.Color.R * 255), math.floor(object.Color.G * 255), math.floor(object.Color.B * 255)}
+                    info.Br = object.Brightness info.Rng = object.Range info.En = object.Enabled and 1 or 0
+                elseif object:IsA("SpecialMesh") then
+                    info.Mid = getStringId(object.MeshId) info.Tid = getStringId(object.TextureId) info.Scl = {object.Scale.X, object.Scale.Y, object.Scale.Z} info.Mt = getStringId(object.MeshType.Name)
+                end
+                return info
+            end
+        end)
+        
+        if successProcess and partInfo then validCount += 1 mainDataBuffer[validCount] = partInfo end
+        if (i % 100 == 0 or i == totalObjects) and TPHAT_UI_StatusLabel and TPHAT_UI_ProgressBar then
+            TPHAT_UI_StatusLabel.Text = "⚡ Đang lưu: " .. math.floor((i / totalObjects) * 100) .. "% (" .. i .. "/" .. totalObjects .. ")"
+            TPHAT_UI_ProgressBar.Size = UDim2.new(i / totalObjects, 0, 1, 0)
+            task.wait()
+        end
+    end
+    
+    local flatStringArray = table.create(stringCounter)
+    for str, id in pairs(stringDict) do flatStringArray[id] = str end
+    
+    local finalJsonOutput = HttpService:JSONEncode({ Dictionary = flatStringArray, Data = mainDataBuffer })
+    pcall(function() if makefolder then makefolder("tphat_save_instance") end end)
+    
+    local nameClean = targetModel and targetModel.Name or "LeakedMap"
+    local primaryPath = "tphat_save_instance/" .. nameClean .. "_V7.Build"
+    pcall(function() if isfile and isfile(primaryPath) then primaryPath = "tphat_save_instance/" .. nameClean .. "_" .. math.random(1000,9999) .. "_V7.Build" end end)
+    
+    writefile(primaryPath, finalJsonOutput)
+    if TPHAT_UI_StatusLabel then TPHAT_UI_StatusLabel.Text = "✅ Đã lưu thành công!" TPHAT_UI_StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 100) end
+end
+
+local function activatePreviewV7(fileNameStr)
+    clearPreview()
+    if not fileNameStr or fileNameStr == "" then return end
+    
+    local fileContent = readfile("tphat_save_instance/" .. fileNameStr)
+    local successDecode, package = pcall(HttpService.JSONDecode, HttpService, fileContent)
+    if not successDecode or not package then return end
+    
+    currentPackageData = package
+    local minX, minY, minZ = math.huge, math.huge, math.huge
+    local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+    local hasParts = false
+    
+    for _, info in ipairs(package.Data) do
+        if info.Cf and info.S then
+            hasParts = true
+            local cf = CFrame.new(unpack(info.Cf))
+            local pos = cf.Position
+            if pos.X < minX then minX = pos.X end if pos.X > maxX then maxX = pos.X end
+            if pos.Y < minY then minY = pos.Y end if pos.Y > maxY then maxY = pos.Y end
+            if pos.Z < minZ then minZ = pos.Z end if pos.Z > maxZ then maxZ = pos.Z end
+        end
+    end
+    
+    local sizeBox = hasParts and Vector3.new(math.max(maxX - minX, 2), math.max(maxY - minY, 2), math.max(maxZ - minZ, 2)) or Vector3.new(10,10,10)
+    local rootPart = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    previewCFrame = rootPart and (rootPart.CFrame * CFrame.new(0, 0, -(sizeBox.Z / 2 + 10))) or CFrame.new(0, 50, 0)
+    
+    currentPreviewPart = Instance.new("Part")
+    currentPreviewPart.Name = "TPHAT_PREVIEW_ANCHOR"
+    currentPreviewPart.Size = sizeBox
+    currentPreviewPart.CFrame = previewCFrame
+    currentPreviewPart.Transparency = 0.85 currentPreviewPart.Color = Color3.fromRGB(255, 0, 150)
+    currentPreviewPart.Material = Enum.Material.ForceField currentPreviewPart.Anchored = true currentPreviewPart.CanCollide = false
+    currentPreviewPart.Parent = workspace
+    
+    currentSelectionBox = Instance.new("SelectionBox")
+    currentSelectionBox.Color3 = Color3.fromRGB(255, 0, 127) currentSelectionBox.Adornee = currentPreviewPart currentSelectionBox.Parent = currentPreviewPart
+end
+
+local function deserializeBuildV7()
+    if not currentPackageData then return end
+    if TPHAT_UI_StatusLabel then TPHAT_UI_StatusLabel.Text = "🏗️ Đang khôi phục hệ thống ma trận chống dãn..." end
+    task.wait(0.02)
+    
+    local dict = currentPackageData.Dictionary or {}
+    local rawData = currentPackageData.Data
+    local totalCount = #rawData
+    local function getStr(id) return id and dict[id] or "" end
+    
+    local idToCreatedInstance = {}
+    local parentJobs = table.create(totalCount)
+    
+    local originalRootCFrame = nil
+    for _, info in ipairs(rawData) do
+        if info.Cf then originalRootCFrame = CFrame.new(unpack(info.Cf)) break end
+    end
+    if not originalRootCFrame then originalRootCFrame = CFrame.new() end
+    
+    local targetPivotCFrame = previewCFrame
+    
+    for idx, info in ipairs(rawData) do
+        pcall(function()
+            local cName = getStr(info.C)
+            local obj = Instance.new(cName or "Folder")
+            if obj then
+                obj.Name = getStr(info.N)
+                if obj:IsA("BasePart") then
+                    if info.S then obj.Size = Vector3.new(info.S[1], info.S[2], info.S[3]) end
+                    
+                    if info.Cf then 
+                        local oldCf = CFrame.new(unpack(info.Cf))
+                        local offset = originalRootCFrame:ToObjectSpace(oldCf)
+                        local combinedCf = targetPivotCFrame * offset
+                        
+                        obj.CFrame = cleanCFrameMatrix(combinedCf)
+                    end
+                    
+                    if info.M then pcall(function() obj.Material = Enum.Material[getStr(info.M)] end) end
+                    if info.Col then obj.Color = Color3.fromRGB(info.Col[1], info.Col[2], info.Col[3]) end
+                    
+                    if forceAnchoredState == "True" then obj.Anchored = true elseif forceAnchoredState == "False" then obj.Anchored = false else obj.Anchored = (info.A == 1) end
+                    if forceCollideState == "True" then obj.CanCollide = true elseif forceCollideState == "False" then obj.CanCollide = false else obj.CanCollide = (info.Cc == 1) end
+                    
+                    if obj:IsA("MeshPart") then
+                        if info.Mid then pcall(function() obj.MeshId = getStr(info.Mid) end) end
+                        if info.Tid then pcall(function() obj.TextureId = getStr(info.Tid) end) end
+                    end
+                elseif obj:IsA("Attachment") then
+                    if info.Cf then 
+                        local oldCf = CFrame.new(unpack(info.Cf))
+                        local offset = originalRootCFrame:ToObjectSpace(oldCf)
+                        obj.CFrame = cleanCFrameMatrix(targetPivotCFrame * offset)
+                    end
+                elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                    if info.Tex then obj.Texture = getStr(info.Tex) end
+                    if info.Face then pcall(function() obj.Face = Enum.NormalId[getStr(info.Face)] end) end
+                elseif obj:IsA("Light") then
+                    if info.Col then obj.Color = Color3.fromRGB(info.Col[1], info.Col[2], info.Col[3]) end
+                    if info.Br then obj.Brightness = info.Br end if info.Rng then obj.Range = info.Rng end
+                    obj.Enabled = (info.En == 1)
+                elseif obj:IsA("SpecialMesh") then
+                    if info.Mid then obj.MeshId = getStr(info.Mid) end if info.Tid then obj.TextureId = getStr(info.Tid) end
+                    if info.Scl then obj.Scale = Vector3.new(info.Scl[1], info.Scl[2], info.Scl[3]) end
+                    if info.Mt then pcall(function() obj.MeshType = Enum.MeshType[getStr(info.Mt)] end) end
+                elseif obj:IsA("JointInstance") then
+                    task.spawn(function()
+                        repeat task.wait() until idToCreatedInstance[info.P0] and idToCreatedInstance[info.P1]
+                        pcall(function() obj.Part0 = idToCreatedInstance[info.P0] obj.Part1 = idToCreatedInstance[info.P1] end)
+                    end)
+                    if info.C0 then obj.C0 = CFrame.new(unpack(info.C0)) end
+                    if info.C1 then obj.C1 = CFrame.new(unpack(info.C1)) end
+                end
+                
+                idToCreatedInstance[info.I] = obj
+                table.insert(parentJobs, { Obj = obj, ParentId = info.P })
+            end
+        end)
+        
+        if idx % 100 == 0 and TPHAT_UI_StatusLabel then
+            TPHAT_UI_StatusLabel.Text = "🔨 Đồng bộ trực giao: " .. math.floor((idx / totalCount) * 100) .. "%"
+            TPHAT_UI_ProgressBar.Size = UDim2.new(idx / totalCount, 0, 1, 0)
+            task.wait()
+        end
+    end
+    
+    local mapContainer = Instance.new("Model", workspace)
+    mapContainer.Name = "TPHAT_RECONSTRUCTED_BUILD"
+    for _, job in ipairs(parentJobs) do
+        pcall(function() job.Obj.Parent = idToCreatedInstance[job.ParentId] or mapContainer end)
+    end
+    
+    clearPreview() currentPackageData = nil
+    if TPHAT_UI_StatusLabel then TPHAT_UI_StatusLabel.Text = "✅ Đã dựng hoàn hảo 1:1 không bị biến dạng!" end
+end
+
+local ScreenGui = Instance.new("ScreenGui") ScreenGui.Name = "TphatHub_Serializer_V79"
+local coreGuiSuccess = pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+if not coreGuiSuccess then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+ScreenGui.ResetOnSpawn = false
+
+local ToggleLogo = Instance.new("TextButton")
+ToggleLogo.BackgroundColor3 = Color3.fromRGB(0, 180, 255) ToggleLogo.Size = UDim2.fromOffset(45, 45) ToggleLogo.Position = UDim2.new(0.05, 0, 0.15, 0)
+ToggleLogo.Text = "TPHAT" ToggleLogo.TextColor3 = Color3.fromRGB(15, 15, 15) ToggleLogo.TextSize = 11 ToggleLogo.Font = Enum.Font.SourceSansBold ToggleLogo.Parent = ScreenGui
+local LogoCorner = Instance.new("UICorner") LogoCorner.CornerRadius = UDim.new(1, 0) LogoCorner.Parent = ToggleLogo
+
+local TPHAT_UI_MainFrame = Instance.new("Frame")
+TPHAT_UI_MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15) TPHAT_UI_MainFrame.Size = UDim2.fromOffset(450, 395) TPHAT_UI_MainFrame.Position = UDim2.new(0.5, -225, 0.5, -197)
+TPHAT_UI_MainFrame.Visible = false TPHAT_UI_MainFrame.Parent = ScreenGui
+local UICorner_Main = Instance.new("UICorner") UICorner_Main.CornerRadius = UDim.new(0, 10) UICorner_Main.Parent = TPHAT_UI_MainFrame
+local TopBorder = Instance.new("Frame") TopBorder.BackgroundColor3 = Color3.fromRGB(0, 180, 255) TopBorder.Size = UDim2.new(1, 0, 0, 4) TopBorder.Parent = TPHAT_UI_MainFrame
+
+local Title = Instance.new("TextLabel") Title.BackgroundTransparency = 1 Title.Text = "TPHAT MATRIX SANITIZER LEAKER V7.9" Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 13 Title.Font = Enum.Font.SourceSansBold Title.Size = UDim2.new(1, -40, 0, 35) Title.Position = UDim2.fromOffset(10, 4) Title.Parent = TPHAT_UI_MainFrame
+
+ToggleLogo.MouseButton1Click:Connect(function() TPHAT_UI_MainFrame.Visible = not TPHAT_UI_MainFrame.Visible end)
+
+local TabBar = Instance.new("Frame") TabBar.Size = UDim2.new(1, -20, 0, 32) TabBar.Position = UDim2.fromOffset(10, 42) TabBar.BackgroundTransparency = 1 TabBar.Parent = TPHAT_UI_MainFrame
+
+local SaveTabBtn = Instance.new("TextButton") SaveTabBtn.Size = UDim2.new(0.5, -5, 1, 0) SaveTabBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28) SaveTabBtn.Text = "📥 TAB SAVE INSTANCE" SaveTabBtn.TextColor3 = Color3.fromRGB(0, 180, 255) SaveTabBtn.Font = Enum.Font.SourceSansBold SaveTabBtn.Parent = TabBar
+local UICorner_T1 = Instance.new("UICorner") UICorner_T1.CornerRadius = UDim.new(0, 5) UICorner_T1.Parent = SaveTabBtn
+
+local LoadTabBtn = Instance.new("TextButton") LoadTabBtn.Size = UDim2.new(0.5, -5, 1, 0) LoadTabBtn.Position = UDim2.new(0.5, 5, 0, 0) LoadTabBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20) LoadTabBtn.Text = "🚀 TAB PREVIEW & LOAD" LoadTabBtn.TextColor3 = Color3.fromRGB(150, 150, 150) LoadTabBtn.Font = Enum.Font.SourceSansBold LoadTabBtn.Parent = TabBar
+local UICorner_T2 = Instance.new("UICorner") UICorner_T2.CornerRadius = UDim.new(0, 5) UICorner_T2.Parent = LoadTabBtn
+
+local SaveTabFrame = Instance.new("Frame") SaveTabFrame.Size = UDim2.new(1, -20, 0, 200) SaveTabFrame.Position = UDim2.fromOffset(10, 85) SaveTabFrame.BackgroundTransparency = 1 SaveTabFrame.Parent = TPHAT_UI_MainFrame
+local PathInput = Instance.new("TextBox") PathInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25) PathInput.Text = "workspace" PathInput.PlaceholderText = "Nhập path mục cần Save..." PathInput.TextColor3 = Color3.fromRGB(255, 255, 255) PathInput.TextSize = 12 PathInput.Size = UDim2.new(1, 0, 0, 40) PathInput.Parent = SaveTabFrame
+local UICorner_In = Instance.new("UICorner") UICorner_In.CornerRadius = UDim.new(0, 6) UICorner_In.Parent = PathInput
+
+local SaveButton = Instance.new("TextButton") SaveButton.BackgroundColor3 = Color3.fromRGB(20, 120, 80) SaveButton.Text = "📥 KHỞI CHẠY LƯU CẤU TRÚC BUILD" SaveButton.TextColor3 = Color3.fromRGB(255, 255, 255) SaveButton.Font = Enum.Font.SourceSansBold SaveButton.Size = UDim2.new(1, 0, 0, 42) SaveButton.Position = UDim2.fromOffset(0, 60) SaveButton.Parent = SaveTabFrame
+local UICorner_B1 = Instance.new("UICorner") UICorner_B1.CornerRadius = UDim.new(0, 6) UICorner_B1.Parent = SaveButton
+
+local LoadTabFrame = Instance.new("Frame") LoadTabFrame.Size = UDim2.new(1, -20, 0, 270) LoadTabFrame.Position = UDim2.fromOffset(10, 85) LoadTabFrame.BackgroundTransparency = 1 LoadTabFrame.Visible = false LoadTabFrame.Parent = TPHAT_UI_MainFrame
+local SelectedFileLabel = Instance.new("TextLabel") SelectedFileLabel.Size = UDim2.new(1, -115, 0, 24) SelectedFileLabel.BackgroundTransparency = 1 SelectedFileLabel.Text = "Chưa chọn file" SelectedFileLabel.TextColor3 = Color3.fromRGB(180, 180, 180) SelectedFileLabel.TextSize = 11 SelectedFileLabel.TextXAlignment = Enum.TextXAlignment.Left SelectedFileLabel.Parent = LoadTabFrame
+
+local RefreshBtn = Instance.new("TextButton") RefreshBtn.Size = UDim2.fromOffset(100, 24) RefreshBtn.Position = UDim2.new(1, -100, 0, 0) RefreshBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40) RefreshBtn.Text = "🔄 Quét Thư Mục" RefreshBtn.TextColor3 = Color3.fromRGB(255, 255, 255) RefreshBtn.TextSize = 11 RefreshBtn.Parent = LoadTabFrame
+local UICorner_Ref = Instance.new("UICorner") UICorner_Ref.CornerRadius = UDim.new(0, 4) UICorner_Ref.Parent = RefreshBtn
+
+TPHAT_FileScrollingFrame = Instance.new("ScrollingFrame") TPHAT_FileScrollingFrame.Size = UDim2.fromOffset(220, 100) TPHAT_FileScrollingFrame.Position = UDim2.fromOffset(0, 30) TPHAT_FileScrollingFrame.BackgroundColor3 = Color3.fromRGB(22, 22, 22) TPHAT_FileScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0) TPHAT_FileScrollingFrame.ScrollBarThickness = 3 TPHAT_FileScrollingFrame.Parent = LoadTabFrame
+local UICorner_Sc = Instance.new("UICorner") UICorner_Sc.CornerRadius = UDim.new(0, 6) UICorner_Sc.Parent = TPHAT_FileScrollingFrame
+local FileListLayout = Instance.new("UIListLayout") FileListLayout.Parent = TPHAT_FileScrollingFrame FileListLayout.Padding = UDim.new(0, 3)
+
+local PreviewToggleBtn = Instance.new("TextButton") PreviewToggleBtn.Size = UDim2.fromOffset(220, 30) PreviewToggleBtn.Position = UDim2.fromOffset(0, 136) PreviewToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 0, 120) PreviewToggleBtn.Text = "🔮 BẬT KHUNG PREVIEW TRƯỚC MẶT" PreviewToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255) PreviewToggleBtn.Font = Enum.Font.SourceSansBold PreviewToggleBtn.TextSize = 11 PreviewToggleBtn.Parent = LoadTabFrame
+local UICorner_Prv = Instance.new("UICorner") UICorner_Prv.CornerRadius = UDim.new(0, 5) UICorner_Prv.Parent = PreviewToggleBtn
+
+local PropertyFrame = Instance.new("Frame") PropertyFrame.Size = UDim2.fromOffset(220, 56) PropertyFrame.Position = UDim2.fromOffset(0, 172) PropertyFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 24) PropertyFrame.Parent = LoadTabFrame
+local UICorner_Prop = Instance.new("UICorner") UICorner_Prop.CornerRadius = UDim.new(0, 5) UICorner_Prop.Parent = PropertyFrame
+
+local AnchorToggleBtn = Instance.new("TextButton") AnchorToggleBtn.Size = UDim2.new(1, -10, 0, 22) AnchorToggleBtn.Position = UDim2.fromOffset(5, 4) AnchorToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 45, 35) AnchorToggleBtn.Text = "⚓ Thuộc tính Anchor: GỐC" AnchorToggleBtn.TextColor3 = Color3.fromRGB(200, 255, 200) AnchorToggleBtn.Font = Enum.Font.SourceSansBold AnchorToggleBtn.TextSize = 10 AnchorToggleBtn.Parent = PropertyFrame
+local UICorner_Anc = Instance.new("UICorner") UICorner_Anc.CornerRadius = UDim.new(0, 4) UICorner_Anc.Parent = AnchorToggleBtn
+
+AnchorToggleBtn.MouseButton1Click:Connect(function()
+    if forceAnchoredState == "Original" then forceAnchoredState = "True" AnchorToggleBtn.Text = "⚓ Thuộc tính Anchor: BẬT HẾT" AnchorToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 80, 40)
+    elseif forceAnchoredState == "True" then forceAnchoredState = "False" AnchorToggleBtn.Text = "⚓ Thuộc tính Anchor: TẮT HẾT" AnchorToggleBtn.BackgroundColor3 = Color3.fromRGB(100, 30, 30)
+    else forceAnchoredState = "Original" AnchorToggleBtn.Text = "⚓ Thuộc tính Anchor: GỐC" AnchorToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 45, 35) end
+end)
+
+local CollideToggleBtn = Instance.new("TextButton") CollideToggleBtn.Size = UDim2.new(1, -10, 0, 22) CollideToggleBtn.Position = UDim2.fromOffset(5, 30) CollideToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 45, 35) CollideToggleBtn.Text = "💥 Thuộc tính va chạm: GỐC" CollideToggleBtn.TextColor3 = Color3.fromRGB(200, 255, 200) CollideToggleBtn.Font = Enum.Font.SourceSansBold CollideToggleBtn.TextSize = 10 CollideToggleBtn.Parent = PropertyFrame
+local UICorner_Col = Instance.new("UICorner") UICorner_Col.CornerRadius = UDim.new(0, 4) UICorner_Col.Parent = CollideToggleBtn
+
+CollideToggleBtn.MouseButton1Click:Connect(function()
+    if forceCollideState == "Original" then forceCollideState = "True" CollideToggleBtn.Text = "💥 Thuộc tính va chạm: BẬT HẾT" CollideToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 80, 40)
+    elseif forceCollideState == "True" then forceCollideState = "False" CollideToggleBtn.Text = "💥 Thuộc tính va chạm: TẮT HẾT" CollideToggleBtn.BackgroundColor3 = Color3.fromRGB(100, 30, 30)
+    else forceCollideState = "Original" CollideToggleBtn.Text = "💥 Thuộc tính va chạm: GỐC" CollideToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 45, 35) end
+end)
+
+local ControlPanel = Instance.new("Frame") ControlPanel.Size = UDim2.fromOffset(195, 198) ControlPanel.Position = UDim2.fromOffset(235, 30) ControlPanel.BackgroundColor3 = Color3.fromRGB(24, 24, 24) ControlPanel.Parent = LoadTabFrame
+local UICorner_Ctrl = Instance.new("UICorner") UICorner_Ctrl.CornerRadius = UDim.new(0, 6) UICorner_Ctrl.Parent = ControlPanel
+local CtrlTitle = Instance.new("TextLabel") CtrlTitle.Size = UDim2.new(1, 0, 0, 18) CtrlTitle.BackgroundTransparency = 1 CtrlTitle.Text = "🎮 ĐIỀU CHỈNH KHUNG" CtrlTitle.TextColor3 = Color3.fromRGB(0, 180, 255) CtrlTitle.Font = Enum.Font.SourceSansBold CtrlTitle.TextSize = 10 CtrlTitle.Parent = ControlPanel
+
+local StudInput = Instance.new("TextBox") StudInput.Size = UDim2.fromOffset(45, 20) StudInput.Position = UDim2.fromOffset(75, 73) StudInput.BackgroundColor3 = Color3.fromRGB(35, 35, 35) StudInput.Text = "5" StudInput.TextColor3 = Color3.fromRGB(0, 255, 150) StudInput.Font = Enum.Font.SourceSansBold StudInput.TextSize = 11 StudInput.ClearTextOnFocus = false StudInput.Parent = ControlPanel
+local UICorner_St = Instance.new("UICorner") UICorner_St.CornerRadius = UDim.new(0, 4) UICorner_St.Parent = StudInput
+StudInput.FocusLost:Connect(function() local val = tonumber(StudInput.Text) if val and val > 0 then moveStep = val else StudInput.Text = tostring(moveStep) end end)
+
+local function createMoveBtn(text, pos, callback)
+    local btn = Instance.new("TextButton") btn.Size = UDim2.fromOffset(48, 24) btn.Position = pos btn.BackgroundColor3 = Color3.fromRGB(40, 44, 52) btn.Text = text btn.TextColor3 = Color3.fromRGB(255, 255, 255) btn.Font = Enum.Font.SourceSansBold btn.TextSize = 11 btn.Parent = ControlPanel
+    local corner = Instance.new("UICorner") corner.CornerRadius = UDim.new(0, 4) corner.Parent = btn
+    btn.MouseButton1Click:Connect(function() if currentPreviewPart then callback() currentPreviewPart.CFrame = previewCFrame end end)
+    return btn
+end
+
+createMoveBtn("Lên", UDim2.fromOffset(75, 26), function() previewCFrame = previewCFrame * CFrame.new(0, moveStep, 0) end)
+createMoveBtn("Xuống", UDim2.fromOffset(75, 115), function() previewCFrame = previewCFrame * CFrame.new(0, -moveStep, 0) end)
+createMoveBtn("Trái", UDim2.fromOffset(15, 71), function() previewCFrame = previewCFrame * CFrame.new(-moveStep, 0, 0) end)
+createMoveBtn("Phải", UDim2.fromOffset(133, 71), function() previewCFrame = previewCFrame * CFrame.new(moveStep, 0, 0) end)
+createMoveBtn("Tới", UDim2.fromOffset(15, 158), function() previewCFrame = previewCFrame * CFrame.new(0, 0, -moveStep) end)
+createMoveBtn("Lui", UDim2.fromOffset(133, 158), function() previewCFrame = previewCFrame * CFrame.new(0, 0, moveStep) end)
+
+local LoadButton = Instance.new("TextButton") LoadButton.BackgroundColor3 = Color3.fromRGB(140, 40, 40) LoadButton.Text = "🚀 TIẾN HÀNH BUILD KHÔI PHỤC VÀO GAME" LoadButton.TextColor3 = Color3.fromRGB(255, 255, 255) LoadButton.Font = Enum.Font.SourceSansBold LoadButton.Size = UDim2.new(1, 0, 0, 34) LoadButton.Position = UDim2.fromOffset(0, 236) LoadButton.Parent = LoadTabFrame
+local UICorner_B2 = Instance.new("UICorner") UICorner_B2.CornerRadius = UDim.new(0, 6) UICorner_B2.Parent = LoadButton
+
+local function refreshFolderFiles()
+    for _, child in ipairs(TPHAT_FileScrollingFrame:GetChildren()) do if child:IsA("TextButton") then child:Destroy() end end
+    local files = {}
+    pcall(function()
+        if listfiles then
+            for _, path in ipairs(listfiles("tphat_save_instance")) do
+                if string.find(string.lower(path), "%.build") then
+                    local cleanName = string.match(path, "([^/\\]+)$")
+                    if cleanName then table.insert(files, cleanName) end
+                end
+            end
+        end
+    end)
+    if #files == 0 then SelectedFileLabel.Text = "❌ Không thấy file .Build!" else SelectedFileLabel.Text = "📁 Tìm thấy " .. #files .. " file:" end
+    TPHAT_FileScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, #files * 28)
+    for idx, fName in ipairs(files) do
+        local FBtn = Instance.new("TextButton") FBtn.Size = UDim2.new(1, -6, 0, 24) FBtn.BackgroundColor3 = Color3.fromRGB(33, 33, 33) FBtn.Text = " 📄 " .. fName FBtn.TextColor3 = Color3.fromRGB(220, 220, 220) FBtn.TextSize = 11 FBtn.TextXAlignment = Enum.TextXAlignment.Left FBtn.Parent = TPHAT_FileScrollingFrame
+        local UICorner_F = Instance.new("UICorner") UICorner_F.CornerRadius = UDim.new(0, 4) UICorner_F.Parent = FBtn
+        FBtn.MouseButton1Click:Connect(function() selectedFileName = fName SelectedFileLabel.Text = "🎯 Chọn: " .. fName SelectedFileLabel.TextColor3 = Color3.fromRGB(0, 180, 255) end)
+    end
+end
+
+RefreshBtn.MouseButton1Click:Connect(refreshFolderFiles)
+PreviewToggleBtn.MouseButton1Click:Connect(function() activatePreviewV7(selectedFileName) end)
+
+SaveTabBtn.MouseButton1Click:Connect(function()
+    SaveTabFrame.Visible = true LoadTabFrame.Visible = false
+    SaveTabBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28) SaveTabBtn.TextColor3 = Color3.fromRGB(0, 180, 255)
+    LoadTabBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20) LoadTabBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+end)
+
+LoadTabBtn.MouseButton1Click:Connect(function()
+    SaveTabFrame.Visible = false LoadTabFrame.Visible = true
+    LoadTabBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28) LoadTabBtn.TextColor3 = Color3.fromRGB(0, 180, 255)
+    SaveTabBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20) SaveTabBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    refreshFolderFiles()
+end)
+
+local ProgressFrame = Instance.new("Frame") ProgressFrame.BackgroundColor3 = Color3.fromRGB(5, 5, 5) ProgressFrame.Size = UDim2.new(1, -20, 0, 4) ProgressFrame.Position = UDim2.fromOffset(10, 355) ProgressFrame.Parent = TPHAT_UI_MainFrame
+TPHAT_UI_ProgressBar = Instance.new("Frame") TPHAT_UI_ProgressBar.BackgroundColor3 = Color3.fromRGB(0, 180, 255) TPHAT_UI_ProgressBar.Size = UDim2.fromOffset(0, 4) TPHAT_UI_ProgressBar.Parent = ProgressFrame
+TPHAT_UI_StatusLabel = Instance.new("TextLabel") TPHAT_UI_StatusLabel.BackgroundTransparency = 1 TPHAT_UI_StatusLabel.Text = "Hệ thống bảo toàn ma trận V7.9 sẵn sàng." TPHAT_UI_StatusLabel.TextColor3 = Color3.fromRGB(130, 130, 130) TPHAT_UI_StatusLabel.TextSize = 11 TPHAT_UI_StatusLabel.Font = Enum.Font.SourceSansItalic TPHAT_UI_StatusLabel.Size = UDim2.new(1, -20, 0, 20) TPHAT_UI_StatusLabel.Position = UDim2.fromOffset(10, 367) TPHAT_UI_StatusLabel.Parent = TPHAT_UI_MainFrame
+
+local executionActive = false
+SaveButton.MouseButton1Click:Connect(function()
+    if executionActive then return end executionActive = true
+    task.spawn(function() pcall(serializeInstanceV7, PathInput.Text) executionActive = false end)
+end)
+
+LoadButton.MouseButton1Click:Connect(function()
+    if executionActive then return end executionActive = true
+    task.spawn(function() pcall(deserializeBuildV7) executionActive = false end)
+end)
+
+local function makeDraggable(obj, isLogo)
+    local dragging, dragStart, startPos
+    obj.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if isLogo or (input.Position.Y - obj.AbsolutePosition.Y < 40) then
+                dragging = true dragStart = input.Position startPos = obj.Position
+                input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+            end
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+makeDraggable(TPHAT_UI_MainFrame, false) makeDraggable(ToggleLogo, true)
