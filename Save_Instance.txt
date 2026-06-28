@@ -1,0 +1,640 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local env = {
+    writefile = writefile,
+    readfile = readfile,
+    makefolder = makefolder,
+    listfiles = listfiles,
+    isfile = isfile,
+    isfolder = isfolder,
+    delfile = delfile,
+    saveinstance = saveinstance,
+    getcustomasset = getcustomasset or getsynasset
+}
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+local TargetFolder = "tphat_save_instance"
+if env.makefolder and env.isfolder and not env.isfolder(TargetFolder) then
+    env.makefolder(TargetFolder)
+end
+
+local LoadedModelsTracker = {}
+local SelectedFileForPreview = ""
+local CurrentPreviewModel = nil
+local PreviewConnection = nil
+local SelectedLoadedModel = nil
+local PreviewPosition = Vector3.new(0, 0, 0)
+
+local IsDraggingModel = false
+local DragConnection = nil
+
+local MoveStuds = 1
+
+local ShouldSaveOrigin = "Không"
+local ShouldLoadOrigin = "Không"
+
+local Window = Rayfield:CreateWindow({
+    Name = "T-Phat Instance Manager",
+    LoadingTitle = "Loading System...",
+    LoadingSubtitle = "by phat_1511",
+    ConfigurationSaving = { Enabled = false }
+})
+
+local MainTab = Window:CreateTab("Save Functions")
+local LoadTab = Window:CreateTab("Load & Preview")
+local PropsTab = Window:CreateTab("Properties")
+
+local PathInputString = ""
+
+local function ProcessOriginCoordinates(filename, targetInstance)
+    if ShouldSaveOrigin ~= "Có" then return end
+    
+    local originCFrame = nil
+    if targetInstance:IsA("Model") then
+        originCFrame = targetInstance:GetPivot()
+    elseif targetInstance:IsA("BasePart") then
+        originCFrame = targetInstance.CFrame
+    else
+        local primary = targetInstance:FindFirstChildWhichIsA("BasePart", true)
+        if primary then originCFrame = primary.CFrame end
+    end
+    
+    if originCFrame then
+        local metaName = string.sub(filename, 1, #filename - 5) .. "_origin.json"
+        local data = {
+            x = originCFrame.X,
+            y = originCFrame.Y,
+            z = originCFrame.Z,
+            r10 = originCFrame.XVector.X, r11 = originCFrame.XVector.Y, r12 = originCFrame.XVector.Z,
+            r20 = originCFrame.YVector.X, r21 = originCFrame.YVector.Y, r22 = originCFrame.YVector.Z,
+            r30 = originCFrame.ZVector.X, r31 = originCFrame.ZVector.Y, r32 = originCFrame.ZVector.Z
+        }
+        if env.writefile then
+            env.writefile(metaName, HttpService:JSONEncode(data))
+            Rayfield:Notify({Title = "Saved", Content = "Origin coordinates bound successfully!", Duration = 3})
+        end
+    end
+end
+
+MainTab:CreateDropdown({
+    Name = "Lưu Toạ Độ Gốc?",
+    Options = {"Có", "Không"},
+    CurrentOption = {"Không"},
+    MultipleOptions = false,
+    Callback = function(Option)
+        ShouldSaveOrigin = Option[1] or Option
+    end
+})
+
+MainTab:CreateInput({
+    Name = "Custom Instance Path",
+    PlaceholderText = "workspace.PartName",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        PathInputString = Text
+    end
+})
+
+MainTab:CreateButton({
+    Name = "Save Path to File (.rbxm)",
+    Callback = function()
+        local target = GetInstanceFromPath(PathInputString)
+        if target and env.saveinstance then
+            local filename = TargetFolder .. "/" .. target.Name .. "_" .. tostring(game.PlaceId) .. ".rbxm"
+            env.saveinstance(target, filename, {
+                Decompile = true,
+                NilInstances = false,
+                RemovePlayerCharacters = true,
+                IgnoreDefaultProps = true
+            })
+            ProcessOriginCoordinates(filename, target)
+        end
+    end
+})
+
+MainTab:CreateButton({
+    Name = "Save Workspace Only",
+    Callback = function()
+        if env.saveinstance then
+            local filename = TargetFolder .. "/Workspace_" .. tostring(game.PlaceId) .. ".rbxl"
+            env.saveinstance(Workspace, filename, {
+                Decompile = true,
+                NilInstances = false,
+                RemovePlayerCharacters = true,
+                IgnoreDefaultProps = true
+            })
+            ProcessOriginCoordinates(filename, Workspace)
+        end
+    end
+})
+
+MainTab:CreateButton({
+    Name = "Save Full Game",
+    Callback = function()
+        if env.saveinstance then
+            local filename = TargetFolder .. "/FullGame_" .. tostring(game.PlaceId) .. ".rbxl"
+            env.saveinstance(game, filename, {
+                Decompile = true,
+                NilInstances = false,
+                RemovePlayerCharacters = true,
+                IgnoreDefaultProps = true
+            })
+        end
+    end
+})
+
+function GetInstanceFromPath(pathStr)
+    if pathStr == "" then return nil end
+    local parts = string.split(pathStr, ".")
+    local current = game
+    if parts[1] == "workspace" or parts[1] == "Workspace" then
+        current = Workspace
+    elseif parts[1] == "game" then
+        current = game
+    else
+        return nil
+    end
+    for i = 2, #parts do
+        if current then
+            current = current:FindFirstChild(parts[i])
+        else
+            return nil
+        end
+    end
+    return current
+end
+
+local FileDropdown
+local LoadedDropdown
+local TransValueLabel
+
+local function UpdateFileList()
+    local files = {}
+    if env.listfiles then
+        local rawFiles = env.listfiles(TargetFolder)
+        for _, file in ipairs(rawFiles) do
+            if string.sub(file, -6) == ".rbxmx" or string.sub(file, -5) == ".rbxm" then
+                table.insert(files, file)
+            end
+        end
+    end
+    if FileDropdown then
+        FileDropdown:Refresh(files, true)
+    end
+end
+
+local function UpdateLoadedList()
+    local names = {}
+    for _, model in ipairs(LoadedModelsTracker) do
+        if model and model.Parent then
+            table.insert(names, model.Name)
+        end
+    end
+    if LoadedDropdown then
+        LoadedDropdown:Refresh(names, true)
+    end
+end
+
+local function IsMouseOverGui()
+    local coreGui = game:GetService("CoreGui")
+    local rayfieldGui = coreGui:FindFirstChild("Rayfield")
+    if rayfieldGui then
+        for _, desc in ipairs(rayfieldGui:GetDescendants()) do
+            if desc:IsA("GuiObject") and desc.Visible then
+                local pos = desc.AbsolutePosition
+                local size = desc.AbsoluteSize
+                if Mouse.X >= pos.X and Mouse.X <= pos.X + size.X and Mouse.Y >= pos.Y and Mouse.Y <= pos.Y + size.Y then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function SnapToGrid(vector, grid)
+    local x = math.round(vector.X / grid) * grid
+    local y = math.round(vector.Y / grid) * grid
+    local z = math.round(vector.Z / grid) * grid
+    return Vector3.new(x, y, z)
+end
+
+FileDropdown = LoadTab:CreateDropdown({
+    Name = "Select Model File",
+    Options = {},
+    CurrentOption = "",
+    MultipleOptions = false,
+    Callback = function(Option)
+        SelectedFileForPreview = Option[1] or Option
+    end
+})
+
+LoadTab:CreateDropdown({
+    Name = "Load Toạ Độ Gốc?",
+    Options = {"Có", "Không"},
+    CurrentOption = {"Không"},
+    MultipleOptions = false,
+    Callback = function(Option)
+        ShouldLoadOrigin = Option[1] or Option
+    end
+})
+
+LoadTab:CreateButton({
+    Name = "Refresh File List",
+    Callback = function()
+        UpdateFileList()
+    end
+})
+
+local function CleanupPreview()
+    if PreviewConnection then
+        PreviewConnection:Disconnect()
+        PreviewConnection = nil
+    end
+    if CurrentPreviewModel then
+        CurrentPreviewModel:Destroy()
+        CurrentPreviewModel = nil
+    end
+end
+
+LoadTab:CreateButton({
+    Name = "Toggle Preview Mode",
+    Callback = function()
+        if CurrentPreviewModel then
+            CleanupPreview()
+            return
+        end
+        
+        if SelectedFileForPreview == "" or not env.readfile then return end
+        
+        local success, model = pcall(function()
+            return game:GetObjects(env.getcustomasset(SelectedFileForPreview))[1]
+        end)
+        
+        if not success or not model then return end
+        if not model:IsA("Model") then
+            local nm = Instance.new("Model")
+            model.Parent = nm
+            model = nm
+        end
+        
+        CurrentPreviewModel = model
+        CurrentPreviewModel.Parent = Workspace
+        
+        for _, p in ipairs(CurrentPreviewModel:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.CanCollide = false
+                p.Anchored = true
+                p.Transparency = 0.5
+            end
+        end
+        
+        PreviewConnection = RunService.RenderStepped:Connect(function()
+            if CurrentPreviewModel and not IsMouseOverGui() then
+                local ray = Workspace.CurrentCamera:ScreenPointToRay(Mouse.X, Mouse.Y)
+                local raycastParams = RaycastParams.new()
+                raycastParams.FilterDescendantsInstances = {CurrentPreviewModel, LocalPlayer.Character}
+                raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+                
+                local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, raycastParams)
+                local rawPosition = result and result.Position or (ray.Origin + ray.Direction * 20)
+                
+                PreviewPosition = SnapToGrid(rawPosition, MoveStuds)
+                CurrentPreviewModel:PivotTo(CFrame.new(PreviewPosition))
+            end
+        end)
+    end
+})
+
+local function FinalizeModelLoad(targetCFrame)
+    if SelectedFileForPreview == "" or not env.readfile then return end
+    local success, model = pcall(function()
+        return game:GetObjects(env.getcustomasset(SelectedFileForPreview))[1]
+    end)
+    
+    if success and model then
+        if not model:IsA("Model") then
+            local nm = Instance.new("Model")
+            model.Parent = nm
+            model = nm
+        end
+        model.Name = "Loaded_" .. model.Name .. "_" .. tostring(#LoadedModelsTracker + 1)
+        model:PivotTo(targetCFrame)
+        model.Parent = Workspace
+        
+        for _, p in ipairs(model:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.Anchored = true
+            end
+        end
+        
+        table.insert(LoadedModelsTracker, model)
+        UpdateLoadedList()
+    end
+end
+
+LoadTab:CreateButton({
+    Name = "Confirm Load Model",
+    Callback = function()
+        if SelectedFileForPreview == "" or not env.readfile then return end
+        local currentPreviewPos = PreviewPosition
+        CleanupPreview()
+        
+        local metaName = string.sub(SelectedFileForPreview, 1, #SelectedFileForPreview - 5) .. "_origin.json"
+        if ShouldLoadOrigin == "Có" and env.isfile and env.isfile(metaName) then
+            local content = env.readfile(metaName)
+            local data = HttpService:JSONDecode(content)
+            local targetCFrame = CFrame.new(data.x, data.y, data.z, data.r10, data.r11, data.r12, data.r20, data.r21, data.r22, data.r30, data.r31, data.r32)
+            FinalizeModelLoad(targetCFrame)
+        else
+            FinalizeModelLoad(CFrame.new(currentPreviewPos))
+        end
+    end
+})
+
+LoadedDropdown = PropsTab:CreateDropdown({
+    Name = "Select Loaded Model",
+    Options = {},
+    CurrentOption = "",
+    MultipleOptions = false,
+    Callback = function(Option)
+        local chosenName = Option[1] or Option
+        SelectedLoadedModel = nil
+        for _, m in ipairs(LoadedModelsTracker) do
+            if m and m.Parent and m.Name == chosenName then
+                SelectedLoadedModel = m
+                break
+            end
+        end
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Refresh Active Models",
+    Callback = function()
+        UpdateLoadedList()
+    end
+})
+
+PropsTab:CreateInput({
+    Name = "Movement Studs",
+    PlaceholderText = "1",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local num = tonumber(Text)
+        if num then MoveStuds = num end
+    end
+})
+
+local function MoveSelectedModel(directionVector)
+    if SelectedLoadedModel and SelectedLoadedModel.Parent then
+        local currentCFrame = SelectedLoadedModel:GetPivot()
+        SelectedLoadedModel:PivotTo(currentCFrame + (directionVector * MoveStuds))
+    end
+end
+
+PropsTab:CreateButton({
+    Name = "Move Up (Lên)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(0, 1, 0))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Move Down (Xuống)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(0, -1, 0))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Move Left (Trái)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(-1, 0, 0))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Move Right (Phải)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(1, 0, 0))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Move Forward (Tiến)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(0, 0, -1))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Move Backward (Lùi)",
+    Callback = function()
+        MoveSelectedModel(Vector3.new(0, 0, 1))
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Get Delete Tool",
+    Callback = function()
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if not backpack then return end
+        
+        local deleteTool = Instance.new("Tool")
+        deleteTool.Name = "Delete Tool"
+        deleteTool.RequiresHandle = false
+        
+        local selectionBox = Instance.new("SelectionBox")
+        selectionBox.Color3 = Color3.fromRGB(148, 0, 211)
+        selectionBox.LineThickness = 0.05
+        selectionBox.Parent = deleteTool
+        
+        local currentSelectedPart = nil
+        
+        deleteTool.Activated:Connect(function()
+            local camera = Workspace.CurrentCamera
+            local mouseRay = camera:ScreenPointToRay(Mouse.X, Mouse.Y)
+            
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+            raycastParams.RespectCanCollide = false 
+            
+            local raycastResult = Workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 1000, raycastParams)
+            
+            if raycastResult and raycastResult.Instance and raycastResult.Instance:IsA("BasePart") then
+                local targetPart = raycastResult.Instance
+                
+                if currentSelectedPart == targetPart then
+                    targetPart:Destroy()
+                    selectionBox.Adornee = nil
+                    currentSelectedPart = nil
+                else
+                    currentSelectedPart = targetPart
+                    selectionBox.Adornee = targetPart
+                end
+            else
+                selectionBox.Adornee = nil
+                currentSelectedPart = nil
+            end
+        end)
+        
+        deleteTool.Unequipped:Connect(function()
+            selectionBox.Adornee = nil
+            currentSelectedPart = nil
+        end)
+        
+        deleteTool.Parent = backpack
+    end
+})
+
+local CurrentTransPercent = 0
+
+local function ApplyTransparency()
+    if SelectedLoadedModel and SelectedLoadedModel.Parent then
+        local transVal = CurrentTransPercent / 100
+        for _, p in ipairs(SelectedLoadedModel:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.Transparency = transVal
+            end
+        end
+        if TransValueLabel then
+            TransValueLabel:Set("Current Opacity: " .. tostring(100 - CurrentTransPercent) .. "%")
+        end
+    end
+end
+
+TransValueLabel = PropsTab:CreateLabel("Current Opacity: 100%")
+
+PropsTab:CreateButton({
+    Name = "<-- Decrease Transparency (More Opaque)",
+    Callback = function()
+        CurrentTransPercent = math.max(0, CurrentTransPercent - 5)
+        ApplyTransparency()
+    end
+})
+
+PropsTab:CreateButton({
+    Name = "Increase Transparency (More Clear) -->",
+    Callback = function()
+        CurrentTransPercent = math.min(100, CurrentTransPercent + 5)
+        ApplyTransparency()
+    end
+})
+
+PropsTab:CreateToggle({
+    Name = "Anchor All Parts",
+    CurrentValue = true,
+    Callback = function(Value)
+        if SelectedLoadedModel and SelectedLoadedModel.Parent then
+            for _, p in ipairs(SelectedLoadedModel:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.Anchored = Value
+                end
+            end
+        end
+    end
+})
+
+PropsTab:CreateToggle({
+    Name = "CanCollide Status",
+    CurrentValue = true,
+    Callback = function(Value)
+        if SelectedLoadedModel and SelectedLoadedModel.Parent then
+            for _, p in ipairs(SelectedLoadedModel:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.CanCollide = Value
+                end
+            end
+        end
+    end
+})
+
+PropsTab:CreateToggle({
+    Name = "Enable Drag Move (Hold to Drag)",
+    CurrentValue = false,
+    Callback = function(Value)
+        IsDraggingModel = Value
+        if not Value and DragConnection then
+            DragConnection:Disconnect()
+            DragConnection = nil
+        end
+    end
+})
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if CurrentPreviewModel and PreviewConnection and not IsMouseOverGui() then
+            local ray = Workspace.CurrentCamera:ScreenPointToRay(Mouse.X, Mouse.Y)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {CurrentPreviewModel, LocalPlayer.Character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+            local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, raycastParams)
+            local rawPosition = result and result.Position or (ray.Origin + ray.Direction * 20)
+            
+            PreviewPosition = SnapToGrid(rawPosition, MoveStuds)
+            CurrentPreviewModel:PivotTo(CFrame.new(PreviewPosition))
+        elseif IsDraggingModel and SelectedLoadedModel and SelectedLoadedModel.Parent then
+            local ray = Workspace.CurrentCamera:ScreenPointToRay(Mouse.X, Mouse.Y)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {SelectedLoadedModel, LocalPlayer.Character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+            local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, raycastParams)
+            
+            if result and result.Instance:IsDescendantOf(SelectedLoadedModel) then
+                if DragConnection then DragConnection:Disconnect() end
+                
+                local previousCanCollide = {}
+                for _, p in ipairs(SelectedLoadedModel:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        previousCanCollide[p] = p.CanCollide
+                        p.CanCollide = false
+                    end
+                end
+                
+                DragConnection = RunService.RenderStepped:Connect(function()
+                    if IsDraggingModel and SelectedLoadedModel and SelectedLoadedModel.Parent then
+                        local dragRay = Workspace.CurrentCamera:ScreenPointToRay(Mouse.X, Mouse.Y)
+                        local dragParams = RaycastParams.new()
+                        dragParams.FilterDescendantsInstances = {SelectedLoadedModel, LocalPlayer.Character}
+                        dragParams.FilterType = Enum.RaycastFilterType.Exclude
+                        local dragResult = Workspace:Raycast(dragRay.Origin, dragRay.Direction * 1000, dragParams)
+                        local dragPos = dragResult and dragResult.Position or (dragRay.Origin + dragRay.Direction * 20)
+                        
+                        SelectedLoadedModel:PivotTo(CFrame.new(SnapToGrid(dragPos, MoveStuds)))
+                    else
+                        if DragConnection then
+                            DragConnection:Disconnect()
+                            DragConnection = nil
+                            for p, val in pairs(previousCanCollide) do
+                                if p and p.Parent then p.CanCollide = val end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, processed)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if DragConnection then
+            DragConnection:Disconnect()
+            DragConnection = nil
+        end
+    end
+end)
+
+UpdateFileList()
+UpdateLoadedList()
